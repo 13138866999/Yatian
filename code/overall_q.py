@@ -19,6 +19,7 @@ from torch.amp import autocast, GradScaler
 from torch.utils.data import DataLoader
 from torchvision import models
 from sklearn.metrics import accuracy_score, f1_score
+import random
 
 def _get_base_dir():
     return os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
@@ -339,7 +340,7 @@ def evaluate_test_models(df_test, label_map, output_dir, mode, batch_size, num_w
         print(avg_per_tone_df)
     return fold_df, per_tone_df
 
-def run_testing_only(csv_path=None, output_dir=None, img_dir=None, mode='fs', batch_size=256, num_workers=None, pin_memory=True, base_dir=None, preprocess_config=None, preprocess_config_path=None):
+def run_testing_only(csv_path=None, output_dir=None, img_dir=None, mode='fs', batch_size=256, num_workers=None, pin_memory=True, base_dir=None, preprocess_config=None, preprocess_config_path=None, seed=42):
     paths = _resolve_paths(csv_path=csv_path, output_dir=output_dir, img_dir=img_dir, base_dir=base_dir)
     csv_path = paths['csv_path']
     output_dir = paths['output_dir']
@@ -355,9 +356,9 @@ def run_testing_only(csv_path=None, output_dir=None, img_dir=None, mode='fs', ba
     else:
         stratify_col = None
     if stratify_col is not None:
-        _, df_test = train_test_split(df, test_size=0.2, random_state=42, shuffle=True, stratify=stratify_col)
+        _, df_test = train_test_split(df, test_size=0.2, random_state=seed, shuffle=True, stratify=stratify_col)
     else:
-        _, df_test = train_test_split(df, test_size=0.2, random_state=42, shuffle=True)
+        _, df_test = train_test_split(df, test_size=0.2, random_state=seed, shuffle=True)
     results_root = _get_results_root(output_dir, mode)
     checkpoints_dir = os.path.join(results_root, 'checkpoints')
     fold_indices = []
@@ -390,20 +391,20 @@ def run_testing_only(csv_path=None, output_dir=None, img_dir=None, mode='fs', ba
         print("Testing per skin tone:")
         print(per_tone_df)
 
-def make_splits(df, stratify_col, num_folds):
+def make_splits(df, stratify_col, num_folds, seed=42):
     has_groups = 'lesion_id' in df.columns and df['lesion_id'].notna().any()
     if stratify_col is not None and has_groups:
-        sg_test = StratifiedGroupKFold(n_splits=5, shuffle=True, random_state=42)
+        sg_test = StratifiedGroupKFold(n_splits=5, shuffle=True, random_state=seed)
         splits = list(sg_test.split(df, stratify_col, groups=df['lesion_id']))
         dev_idx, test_idx = splits[0]
         df_dev = df.iloc[dev_idx].copy()
         df_test = df.iloc[test_idx].copy()
-        kfold = StratifiedGroupKFold(n_splits=num_folds, shuffle=True, random_state=42)
+        kfold = StratifiedGroupKFold(n_splits=num_folds, shuffle=True, random_state=seed)
         split_generator = kfold.split(df_dev, df_dev['skin_tone'], groups=df_dev['lesion_id'])
         return df_dev, df_test, split_generator
     elif stratify_col is not None:
-        df_dev, df_test = train_test_split(df, test_size=0.2, random_state=42, shuffle=True, stratify=stratify_col)
-        kfold = StratifiedKFold(n_splits=num_folds, shuffle=True, random_state=42)
+        df_dev, df_test = train_test_split(df, test_size=0.2, random_state=seed, shuffle=True, stratify=stratify_col)
+        kfold = StratifiedKFold(n_splits=num_folds, shuffle=True, random_state=seed)
         split_generator = kfold.split(df_dev, df_dev['skin_tone'])
         return df_dev, df_test, split_generator
     elif has_groups:
@@ -416,8 +417,8 @@ def make_splits(df, stratify_col, num_folds):
         split_generator = kfold.split(df_dev, groups=df_dev['lesion_id'])
         return df_dev, df_test, split_generator
     else:
-        df_dev, df_test = train_test_split(df, test_size=0.2, random_state=42, shuffle=True)
-        kfold = KFold(n_splits=num_folds, shuffle=True, random_state=42)
+        df_dev, df_test = train_test_split(df, test_size=0.2, random_state=seed, shuffle=True)
+        kfold = KFold(n_splits=num_folds, shuffle=True, random_state=seed)
         split_generator = kfold.split(df_dev)
         return df_dev, df_test, split_generator
 
@@ -486,13 +487,18 @@ def save_best_checkpoint(output_dir, mode, fold_index, model, best_f1_macro, bes
     }, checkpoint_path)
 
 label_map = {}
-def training(df=None, csv_path=None, output_dir=None, img_dir=None, mode='fs', epochs=10, batch_size=256, num_folds=7, num_workers=None, pin_memory=True, learning_rate=1e-4, base_dir=None, preprocess_config=None, preprocess_config_path=None):
+def training(df=None, csv_path=None, output_dir=None, img_dir=None, mode='fs', epochs=10, batch_size=256, num_folds=7, num_workers=None, pin_memory=True, learning_rate=1e-4, base_dir=None, preprocess_config=None, preprocess_config_path=None, seed=42):
     paths = _resolve_paths(csv_path=csv_path, output_dir=output_dir, img_dir=img_dir, base_dir=base_dir)
     csv_path = paths['csv_path']
     output_dir = paths['output_dir']
     image_root = paths['img_dir']
     df = prepare_data(df, csv_path, output_dir, base_dir=base_dir, config=preprocess_config, config_path=preprocess_config_path)
     label_map = {diag: i for i, diag in enumerate(df['diagnosis'].unique())}
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.benchmark = True
     num_workers = min(12, (os.cpu_count() or 4)) if num_workers is None else num_workers
     persistent_workers = num_workers > 0
@@ -506,7 +512,7 @@ def training(df=None, csv_path=None, output_dir=None, img_dir=None, mode='fs', e
         print("\nWarning: 'median_ita' column not found. Stratified sampling disabled.")
         stratify_col = None
     os.makedirs(output_dir, exist_ok=True)
-    df_dev, df_test, split_generator = make_splits(df, stratify_col, num_folds)
+    df_dev, df_test, split_generator = make_splits(df, stratify_col, num_folds, seed=seed)
     fold_train_images = []
     fold_Q_refs = []
     best_overall_f1_macro = -1.0
@@ -589,6 +595,7 @@ if __name__ == "__main__":
     parser.add_argument('--pin-memory', dest='pin_memory', action='store_true')
     parser.add_argument('--no-pin-memory', dest='pin_memory', action='store_false')
     parser.set_defaults(pin_memory=True)
+    parser.add_argument('--seed', type=int, default=42)
     args = parser.parse_args()
 
     paths = _resolve_paths(csv_path=args.csv_path, output_dir=args.output_dir)
@@ -600,6 +607,7 @@ if __name__ == "__main__":
     mode = args.mode
     start_time = time.time()
     run_test_only = args.run_test_only
+    seed = args.seed
     preprocess_config_path = args.preprocess_config
     epochs = args.epochs
     batch_size = args.batch_size
@@ -617,7 +625,8 @@ if __name__ == "__main__":
         'num_workers': num_workers,
         'learning_rate': learning_rate,
         'pin_memory': pin_memory,
-        'run_test_only': run_test_only
+        'run_test_only': run_test_only,
+        'seed': seed
     }
     results_root = _get_results_root(output_dir, mode)
     os.makedirs(results_root, exist_ok=True)
@@ -629,9 +638,9 @@ if __name__ == "__main__":
         print(f"✅ 预处理数据已存在：{len(os.listdir(output_dir))} 个文件")
     if run_test_only:
         print("\n=== 步骤2：开始测试流程（仅测试） ===")
-        run_testing_only(csv_path=csv_path, output_dir=output_dir, img_dir=img_dir, mode=mode, batch_size=batch_size, num_workers=num_workers, pin_memory=pin_memory, base_dir=base_dir, preprocess_config_path=preprocess_config_path)
+        run_testing_only(csv_path=csv_path, output_dir=output_dir, img_dir=img_dir, mode=mode, batch_size=batch_size, num_workers=num_workers, pin_memory=pin_memory, base_dir=base_dir, preprocess_config_path=preprocess_config_path, seed=seed)
     else:
         print("\n=== 步骤2：开始训练流程 ===")
-        training(csv_path=csv_path, output_dir=output_dir, img_dir=img_dir, mode=mode, epochs=epochs, batch_size=batch_size, num_folds=num_folds, num_workers=num_workers, pin_memory=pin_memory, learning_rate=learning_rate, base_dir=base_dir, preprocess_config_path=preprocess_config_path)
+        training(csv_path=csv_path, output_dir=output_dir, img_dir=img_dir, mode=mode, epochs=epochs, batch_size=batch_size, num_folds=num_folds, num_workers=num_workers, pin_memory=pin_memory, learning_rate=learning_rate, base_dir=base_dir, preprocess_config_path=preprocess_config_path, seed=seed)
     elapsed = time.time() - start_time
     print(f"\n=== 总耗时：{elapsed:.2f} 秒 ===")
