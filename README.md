@@ -4,12 +4,12 @@
 
 ## 1. Project Overview
 
-[cite_start]This project reproduces the methodology from "Mitigating Individual Skin Tone Bias in Skin Lesion Classification through Distribution-Aware Reweighting" (arXiv:2512.08733)[cite: 1].
+This project reproduces the methodology from "Mitigating Individual Skin Tone Bias in Skin Lesion Classification through Distribution-Aware Reweighting" (arXiv:2512.08733).
 
 The paper proposes shifting fairness evaluation from discrete subgroups (Fitzpatrick Skin Types) to a continuous distribution based on Individual Typology Angle (ITA). By using Kernel Density Estimation (KDE), the method reweights the loss function to mitigate bias against underrepresented skin tones.
 
 ### Implemented Metrics
-[cite_start]We implemented the following distance-based metrics for loss reweighting[cite: 8]:
+We implemented the following distance-based metrics for loss reweighting:
 * FS (Fidelity Similarity / Bhattacharyya): Measures distribution overlap.
 * WD (Wasserstein Distance 1-D): Measures the work to transform one distribution to another.
 * PF (Patrick-Fisher Distance): Euclidean distance between distributions.
