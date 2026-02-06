@@ -26,3 +26,10 @@ Thumbs.db
 
 # Caches
 **/__pycache__/
+code/compare_skin_tone.py
+code/debug_qi_outliers.py
+code/ita_checking.py
+code/output.py
+code/probe_ita_range.py
+code/resnet50_download.py
+code/tests/
