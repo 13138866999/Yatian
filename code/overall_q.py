@@ -1,7 +1,7 @@
 from typing import Any
 import argparse
 import time
-from preprocessing import process_image
+from preprocessing import process_image, prepare_data
 import os 
 import pandas as pd
 import numpy as np
@@ -19,6 +19,39 @@ from torch.amp import autocast, GradScaler
 from torch.utils.data import DataLoader
 from torchvision import models
 from sklearn.metrics import accuracy_score, f1_score
+
+def _get_base_dir():
+    return os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+
+def _normalize_path(path, base_dir):
+    if path is None:
+        return None
+    if os.path.isabs(path):
+        return os.path.abspath(path)
+    return os.path.abspath(os.path.join(base_dir, path))
+
+def _resolve_paths(csv_path=None, output_dir=None, img_dir=None, mask_dir=None, meta_path=None, base_dir=None):
+    base_dir = os.path.abspath(base_dir or os.path.join(os.path.dirname(__file__), '..'))
+    data_dir = os.path.join(base_dir, 'data')
+    if csv_path is None:
+        csv_path = os.path.join(data_dir, 'GroundTruth.csv')
+    if output_dir is None:
+        output_dir = os.path.join(data_dir, 'qi')
+    if img_dir is None:
+        img_dir = os.path.join(data_dir, 'images')
+    if mask_dir is None:
+        mask_dir = os.path.join(data_dir, 'masks')
+    if meta_path is None:
+        meta_path = os.path.join(data_dir, 'HAM10000_metadata.csv')
+    return {
+        'base_dir': base_dir,
+        'data_dir': data_dir,
+        'csv_path': _normalize_path(csv_path, base_dir),
+        'output_dir': _normalize_path(output_dir, base_dir),
+        'img_dir': _normalize_path(img_dir, base_dir),
+        'mask_dir': _normalize_path(mask_dir, base_dir),
+        'meta_path': _normalize_path(meta_path, base_dir)
+    }
 
 train_transform = transforms.Compose([
     transforms.Resize(256),
@@ -49,9 +82,12 @@ def get_skin_tone_label(ita):
     elif ita > -30: return 'Type 5'
     else: return 'Type 6'
 
-def preprocessing(img_dir = '/root/skinai/data/images', mask_dir = '/root/skinai/data/masks', 
-                  output_dir = '/root/skinai/data/qi', dataf = None,
-                  csv_path = '/root/skinai/data/GroundTruth.csv'):
+def preprocessing(img_dir=None, mask_dir=None, output_dir=None, dataf=None, csv_path=None, base_dir=None):
+    paths = _resolve_paths(csv_path=csv_path, output_dir=output_dir, img_dir=img_dir, mask_dir=mask_dir, base_dir=base_dir)
+    img_dir = paths['img_dir']
+    mask_dir = paths['mask_dir']
+    output_dir = paths['output_dir']
+    csv_path = paths['csv_path']
     if dataf is None:
         if os.path.exists(csv_path):
             df = pd.read_csv(csv_path)
@@ -81,85 +117,21 @@ def preprocessing(img_dir = '/root/skinai/data/images', mask_dir = '/root/skinai
         print(f"Saved median ITA values to {medians_csv_path}")
 
     print(f"处理完成，成功 {len(valid_results)} 个任务，失败 {len(failed)} 个任务")
-def prepare_data(df=None, csv_path='/root/skinai/data/GroundTruth.csv', output_dir='/root/skinai/data/qi'):
-    if df is None:
-        df = pd.read_csv(csv_path)
-    disease_columns = ['MEL', 'NV', 'BCC', 'AKIEC', 'BKL', 'DF', 'VASC']
     
-    # 检查是否所有病种列都存在
-    existing_disease_cols = [col for col in disease_columns if col in df.columns]
-    if len(existing_disease_cols) > 0:
-        # 获取每个样本的病种（one-hot中为1的列）
-        def get_diagnosis(row):
-            for col in existing_disease_cols:
-                if row[col] == 1.0:
-                    return col
-            return 'Unknown'  # 如果没有找到1，返回Unknown
-        
-        df['diagnosis'] = df.apply(get_diagnosis, axis=1)
-        
-        print(f"\nDisease Distribution (Full Dataset):")
-        print(df['diagnosis'].value_counts())
-        
-        # 删除原来的one-hot列来节省空间
-        df = df.drop(columns=existing_disease_cols)
-        print(f"Removed one-hot columns: {existing_disease_cols}")
-    else:
-        if 'diagnosis' in df.columns:
-            df['diagnosis'] = df['diagnosis'].astype(str)
-        elif 'dx' in df.columns:
-            df['diagnosis'] = df['dx'].astype(str)
-        else:
-            df['diagnosis'] = 'Unknown'
-        print("\nDisease Distribution (Full Dataset):")
-        print(df['diagnosis'].value_counts())
-        print("\nWarning: No disease columns found for diagnosis conversion.")
-    # --- Data Merging Logic ---
-    ita_csv_path = os.path.join(output_dir, 'ita_medians.csv')
-    if os.path.exists(ita_csv_path):
-        ita_df = pd.read_csv(ita_csv_path)
-        
-        # Drop NaNs
-        ita_df = ita_df.dropna(subset=['median_ita'])
-        
-        # Inner Join
-        df = pd.merge(df, ita_df, on='image', how='inner')
-        print(f"Merged data shape: {df.shape}")
-        if not df.empty:
-            print("First row sample:")
-            print(df.iloc[0])
-        else:
-            print(f"Warning: {ita_csv_path} not found. Using original GroundTruth only.")
-
-    # 关联 HAM10000 元数据，获取 lesion_id
-    meta_path = '/root/skinai/data/HAM10000_metadata.csv'
-    if os.path.exists(meta_path):
-        meta = pd.read_csv(meta_path, usecols=['lesion_id', 'image_id'])
-        df = pd.merge(df, meta, left_on='image', right_on='image_id', how='left')
-        df = df.drop(columns=['image_id'])
-        print("Joined HAM10000 metadata: added lesion_id")
-    else:
-        raise FileNotFoundError(f"CRITICAL: {meta_path} missing! Cannot perform lesion-level split.")
-    
-    return df# --------------------------
-
-    # Generate Skin Tone Labels for Stratification
-    
-    
-    # Convert one-hot encoded disease columns to single diagnosis column
-    
-    return df
-
-def calOverallQ(df, mode = 'bs'):
+def calOverallQ(df, mode='bs', qi_dir=None, output_dir=None, base_dir=None):
     methods = ['fs', 'wd', 'pf', 'bs']
     if mode not in methods:
         raise ValueError(f"Mode {mode} not in {methods}")
+    base_dir = _get_base_dir() if base_dir is None else base_dir
+    if qi_dir is None:
+        qi_dir = output_dir or os.path.join(base_dir, 'data', 'qi')
+    qi_dir = _normalize_path(qi_dir, base_dir)
     
     train_histograms = []
     missing_files = []
     
     for img_id in df['image']:
-        file_path = f'/root/skinai/data/qi/{img_id}.npy'
+        file_path = os.path.join(qi_dir, f'{img_id}.npy')
         try:
             if os.path.exists(file_path):
                 qi = np.load(file_path)
@@ -297,11 +269,11 @@ def save_evaluation(output_dir, mode, fold_index, epoch, train_loss, val_loss, v
     per_group_rows.insert(0, 'epoch', epoch)
     per_group_rows.to_csv(per_group_file, mode='a', header=not os.path.exists(per_group_file), index=False)
 
-def evaluate_test_models(df_test, label_map, output_dir, mode, batch_size, num_workers, pin_memory, persistent_workers, num_folds):
+def evaluate_test_models(df_test, label_map, output_dir, mode, batch_size, num_workers, pin_memory, persistent_workers, num_folds, image_root=None):
     results_root = _get_results_root(output_dir, mode)
     results_dir = os.path.join(results_root, 'testing')
     os.makedirs(results_dir, exist_ok=True)
-    skin_ds_test = SkinDs(df_test, label_map, transform=val_transform)
+    skin_ds_test = SkinDs(df_test, label_map, transform=val_transform, image_root=image_root)
     test_loader = DataLoader(
         skin_ds_test,
         batch_size=batch_size,
@@ -367,8 +339,12 @@ def evaluate_test_models(df_test, label_map, output_dir, mode, batch_size, num_w
         print(avg_per_tone_df)
     return fold_df, per_tone_df
 
-def run_testing_only(csv_path='/root/skinai/data/GroundTruth.csv', output_dir='/root/skinai/data/qi', mode='fs', batch_size=256, num_workers=None, pin_memory=True):
-    df = prepare_data(None, csv_path, output_dir)
+def run_testing_only(csv_path=None, output_dir=None, img_dir=None, mode='fs', batch_size=256, num_workers=None, pin_memory=True, base_dir=None, preprocess_config=None, preprocess_config_path=None):
+    paths = _resolve_paths(csv_path=csv_path, output_dir=output_dir, img_dir=img_dir, base_dir=base_dir)
+    csv_path = paths['csv_path']
+    output_dir = paths['output_dir']
+    image_root = paths['img_dir']
+    df = prepare_data(None, csv_path, output_dir, base_dir=base_dir, config=preprocess_config, config_path=preprocess_config_path)
     label_map = {diag: i for i, diag in enumerate(df['diagnosis'].unique())}
     torch.backends.cudnn.benchmark = True
     num_workers = min(12, (os.cpu_count() or 4)) if num_workers is None else num_workers
@@ -404,7 +380,8 @@ def run_testing_only(csv_path='/root/skinai/data/GroundTruth.csv', output_dir='/
         num_workers=num_workers,
         pin_memory=pin_memory,
         persistent_workers=persistent_workers,
-        num_folds=num_folds
+        num_folds=num_folds,
+        image_root=image_root
     )
     if not fold_df.empty:
         print("Testing per fold:")
@@ -413,9 +390,108 @@ def run_testing_only(csv_path='/root/skinai/data/GroundTruth.csv', output_dir='/
         print("Testing per skin tone:")
         print(per_tone_df)
 
+def make_splits(df, stratify_col, num_folds):
+    has_groups = 'lesion_id' in df.columns and df['lesion_id'].notna().any()
+    if stratify_col is not None and has_groups:
+        sg_test = StratifiedGroupKFold(n_splits=5, shuffle=True, random_state=42)
+        splits = list(sg_test.split(df, stratify_col, groups=df['lesion_id']))
+        dev_idx, test_idx = splits[0]
+        df_dev = df.iloc[dev_idx].copy()
+        df_test = df.iloc[test_idx].copy()
+        kfold = StratifiedGroupKFold(n_splits=num_folds, shuffle=True, random_state=42)
+        split_generator = kfold.split(df_dev, df_dev['skin_tone'], groups=df_dev['lesion_id'])
+        return df_dev, df_test, split_generator
+    elif stratify_col is not None:
+        df_dev, df_test = train_test_split(df, test_size=0.2, random_state=42, shuffle=True, stratify=stratify_col)
+        kfold = StratifiedKFold(n_splits=num_folds, shuffle=True, random_state=42)
+        split_generator = kfold.split(df_dev, df_dev['skin_tone'])
+        return df_dev, df_test, split_generator
+    elif has_groups:
+        g_test = GroupKFold(n_splits=5)
+        splits = list(g_test.split(df, groups=df['lesion_id']))
+        dev_idx, test_idx = splits[0]
+        df_dev = df.iloc[dev_idx].copy()
+        df_test = df.iloc[test_idx].copy()
+        kfold = GroupKFold(n_splits=num_folds)
+        split_generator = kfold.split(df_dev, groups=df_dev['lesion_id'])
+        return df_dev, df_test, split_generator
+    else:
+        df_dev, df_test = train_test_split(df, test_size=0.2, random_state=42, shuffle=True)
+        kfold = KFold(n_splits=num_folds, shuffle=True, random_state=42)
+        split_generator = kfold.split(df_dev)
+        return df_dev, df_test, split_generator
+
+def build_dataloader(df, label_map, transform, batch_size, shuffle, num_workers, pin_memory, persistent_workers, image_root=None):
+    ds = SkinDs(df, label_map, transform=transform, image_root=image_root)
+    return DataLoader(
+        ds,
+        batch_size=batch_size,
+        shuffle=shuffle,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+        persistent_workers=persistent_workers
+    )
+
+def build_model(num_classes, learning_rate):
+    model = models.resnet50(weights='IMAGENET1K_V1')
+    model.fc = nn.Linear(model.fc.in_features, num_classes)
+    model = model.to('cuda', memory_format=torch.channels_last)
+    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+    criterion = nn.CrossEntropyLoss(reduction='none')
+    use_amp = torch.cuda.is_available()
+    scaler = GradScaler('cuda', enabled=use_amp)
+    return model, optimizer, criterion, scaler, use_amp
+
+def compute_weights(df_train_fold, mode, output_dir=None, base_dir=None):
+    if mode == 'bs':
+        return np.ones(len(df_train_fold))
+    Q_ref, distances = calOverallQ(df_train_fold, mode, output_dir=output_dir, base_dir=base_dir)
+    weights = calculate_drw_weights(distances)
+    return weights
+
+def train_one_epoch(model, train_loader, optimizer, scaler, criterion):
+    train_loss_sum = 0.0
+    train_samples = 0
+    for image, label, weight, _ in train_loader:
+        image = image.to('cuda', non_blocking=True, memory_format=torch.channels_last)
+        label = label.to('cuda', non_blocking=True)
+        weight = weight.to('cuda', non_blocking=True)
+        optimizer.zero_grad(set_to_none=True)
+        with autocast('cuda', enabled=scaler.is_enabled()):
+            output = model(image)
+            loss = (criterion(output, label) * weight).sum()
+        scaler.scale(loss).backward()
+        scaler.step(optimizer)
+        scaler.update()
+        train_loss_sum += loss.item()
+        train_samples += label.size(0)
+    return train_loss_sum / train_samples if train_samples > 0 else 0.0
+
+def evaluate_and_log(model, val_loader, criterion, output_dir, mode, fold_index, epoch, train_loss_avg):
+    val_loss, val_accuracy, val_f1_macro, val_f1_weighted, per_group_df, _ = evaluate(model, val_loader, criterion)
+    save_evaluation(output_dir, mode, fold_index, epoch, train_loss_avg, val_loss, val_accuracy, val_f1_macro, val_f1_weighted, per_group_df)
+    return val_loss, val_accuracy, val_f1_macro, val_f1_weighted, per_group_df
+
+def save_best_checkpoint(output_dir, mode, fold_index, model, best_f1_macro, best_epoch, label_map):
+    results_root = _get_results_root(output_dir, mode)
+    checkpoint_dir = os.path.join(results_root, 'checkpoints')
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    checkpoint_path = os.path.join(checkpoint_dir, f'fold_{fold_index}_{mode}_best.pth')
+    torch.save({
+        'state_dict': model.state_dict(),
+        'best_f1_macro': best_f1_macro,
+        'epoch': best_epoch,
+        'fold': fold_index,
+        'label_map': label_map
+    }, checkpoint_path)
+
 label_map = {}
-def training(df=None, csv_path='/root/skinai/data/GroundTruth.csv', output_dir='/root/skinai/data/qi', mode='fs', epochs=10, batch_size=256, num_folds=7, num_workers=None, pin_memory=True, learning_rate=1e-4):
-    df = prepare_data(df, csv_path, output_dir)
+def training(df=None, csv_path=None, output_dir=None, img_dir=None, mode='fs', epochs=10, batch_size=256, num_folds=7, num_workers=None, pin_memory=True, learning_rate=1e-4, base_dir=None, preprocess_config=None, preprocess_config_path=None):
+    paths = _resolve_paths(csv_path=csv_path, output_dir=output_dir, img_dir=img_dir, base_dir=base_dir)
+    csv_path = paths['csv_path']
+    output_dir = paths['output_dir']
+    image_root = paths['img_dir']
+    df = prepare_data(df, csv_path, output_dir, base_dir=base_dir, config=preprocess_config, config_path=preprocess_config_path)
     label_map = {diag: i for i, diag in enumerate(df['diagnosis'].unique())}
     torch.backends.cudnn.benchmark = True
     num_workers = min(12, (os.cpu_count() or 4)) if num_workers is None else num_workers
@@ -430,32 +506,7 @@ def training(df=None, csv_path='/root/skinai/data/GroundTruth.csv', output_dir='
         print("\nWarning: 'median_ita' column not found. Stratified sampling disabled.")
         stratify_col = None
     os.makedirs(output_dir, exist_ok=True)
-    has_groups = 'lesion_id' in df.columns and df['lesion_id'].notna().any()
-    if stratify_col is not None and has_groups:
-        sg_test = StratifiedGroupKFold(n_splits=5, shuffle=True, random_state=42)
-        splits = list(sg_test.split(df, stratify_col, groups=df['lesion_id']))
-        dev_idx, test_idx = splits[0]
-        df_dev = df.iloc[dev_idx].copy()
-        df_test = df.iloc[test_idx].copy()
-        kfold = StratifiedGroupKFold(n_splits=num_folds, shuffle=True, random_state=42)
-        split_generator = kfold.split(df_dev, df_dev['skin_tone'], groups=df_dev['lesion_id'])
-    elif stratify_col is not None:
-        df_dev, df_test = train_test_split(df, test_size=0.2, random_state=42, shuffle=True, stratify=stratify_col)
-        kfold = StratifiedKFold(n_splits=num_folds, shuffle=True, random_state=42)
-        split_generator = kfold.split(df_dev, df_dev['skin_tone'])
-    elif has_groups:
-        # 无肤色分层时，按 lesion 分组保持同病灶不跨集
-        g_test = GroupKFold(n_splits=5)
-        splits = list(g_test.split(df, groups=df['lesion_id']))
-        dev_idx, test_idx = splits[0]
-        df_dev = df.iloc[dev_idx].copy()
-        df_test = df.iloc[test_idx].copy()
-        kfold = GroupKFold(n_splits=num_folds)
-        split_generator = kfold.split(df_dev, groups=df_dev['lesion_id'])
-    else:
-        df_dev, df_test = train_test_split(df, test_size=0.2, random_state=42, shuffle=True)
-        kfold = KFold(n_splits=num_folds, shuffle=True, random_state=42)
-        split_generator = kfold.split(df_dev)
+    df_dev, df_test, split_generator = make_splits(df, stratify_col, num_folds)
     fold_train_images = []
     fold_Q_refs = []
     best_overall_f1_macro = -1.0
@@ -466,58 +517,15 @@ def training(df=None, csv_path='/root/skinai/data/GroundTruth.csv', output_dir='
     for fold_index, (train_idx, val_idx) in enumerate(split_generator):
         df_train_fold = df_dev.iloc[train_idx].copy()
         df_val_fold = df_dev.iloc[val_idx].copy()
-        if mode == 'bs':
-            df_train_fold['weight'] = 1.0
-        else:
-            Q_ref, distances = calOverallQ(df_train_fold, mode)
-            weights = calculate_drw_weights(distances)
-            df_train_fold['weight'] = weights
-        skin_ds_train = SkinDs(df_train_fold, label_map, transform=train_transform)
-        train_loader = DataLoader(
-            skin_ds_train,
-            batch_size=batch_size,
-            shuffle=True,
-            num_workers=num_workers,
-            pin_memory=pin_memory,
-            persistent_workers=persistent_workers
-        )
-        skin_ds_val = SkinDs(df_val_fold, label_map, transform=val_transform)
-        val_loader = DataLoader(
-            skin_ds_val,
-            batch_size=batch_size,
-            shuffle=False,
-            num_workers=num_workers,
-            pin_memory=pin_memory,
-            persistent_workers=persistent_workers
-        )
-
-        model = models.resnet50(weights='IMAGENET1K_V1')        
-        model.fc = nn.Linear(model.fc.in_features, len(label_map))
-        model = model.to('cuda', memory_format=torch.channels_last)
-        optimizer = optim.Adam(model.parameters(), lr=learning_rate)
-        criterion = nn.CrossEntropyLoss(reduction = 'none')
-        use_amp = torch.cuda.is_available()
-        scaler = GradScaler('cuda', enabled=use_amp)
+        df_train_fold['weight'] = compute_weights(df_train_fold, mode, output_dir=output_dir, base_dir=base_dir)
+        train_loader = build_dataloader(df_train_fold, label_map, train_transform, batch_size, True, num_workers, pin_memory, persistent_workers, image_root=image_root)
+        val_loader = build_dataloader(df_val_fold, label_map, val_transform, batch_size, False, num_workers, pin_memory, persistent_workers, image_root=image_root)
+        model, optimizer, criterion, scaler, _ = build_model(len(label_map), learning_rate)
         best_fold_f1_macro = -1.0
         best_fold_epoch = None
         for epoch in range(epochs):
-            train_loss_sum = 0.0
-            train_samples = 0
-            for image, label, weight, _ in train_loader:
-                image = image.to('cuda', non_blocking=True, memory_format=torch.channels_last)
-                label = label.to('cuda', non_blocking=True)
-                weight = weight.to('cuda', non_blocking=True)
-                optimizer.zero_grad(set_to_none=True)
-                with autocast('cuda', enabled=use_amp):
-                    output = model(image)
-                    loss = (criterion(output, label) * weight).sum()
-                scaler.scale(loss).backward()
-                scaler.step(optimizer)
-                scaler.update()
-                train_loss_sum += loss.item()
-                train_samples += label.size(0)
-            train_loss_avg = train_loss_sum / train_samples if train_samples > 0 else 0.0
-            val_loss, val_accuracy, val_f1_macro, val_f1_weighted, per_group_df, _ = evaluate(model, val_loader, criterion)
+            train_loss_avg = train_one_epoch(model, train_loader, optimizer, scaler, criterion)
+            val_loss, val_accuracy, val_f1_macro, val_f1_weighted, per_group_df = evaluate_and_log(model, val_loader, criterion, output_dir, mode, fold_index, epoch + 1, train_loss_avg)
             print(f"Epoch {epoch+1}: Train Loss = {train_loss_avg:.4f}, Val Loss = {val_loss:.4f}, Val Accuracy = {val_accuracy:.4f}")
             for _, row in per_group_df.iterrows():
                 print(
@@ -525,21 +533,10 @@ def training(df=None, csv_path='/root/skinai/data/GroundTruth.csv', output_dir='
                     f"F1_w = {row['f1_weighted']:.4f}, F1_m = {row['f1_macro']:.4f}, "
                     f"Support = {int(row['support'])}"
                 )
-            save_evaluation(output_dir, mode, fold_index, epoch + 1, train_loss_avg, val_loss, val_accuracy, val_f1_macro, val_f1_weighted, per_group_df)
             if val_f1_macro > best_fold_f1_macro:
                 best_fold_f1_macro = val_f1_macro
                 best_fold_epoch = epoch + 1
-                results_root = _get_results_root(output_dir, mode)
-                checkpoint_dir = os.path.join(results_root, 'checkpoints')
-                os.makedirs(checkpoint_dir, exist_ok=True)
-                checkpoint_path = os.path.join(checkpoint_dir, f'fold_{fold_index}_{mode}_best.pth')
-                torch.save({
-                    'state_dict': model.state_dict(),
-                    'best_f1_macro': best_fold_f1_macro,
-                    'epoch': best_fold_epoch,
-                    'fold': fold_index,
-                    'label_map': label_map
-                }, checkpoint_path)
+                save_best_checkpoint(output_dir, mode, fold_index, model, best_fold_f1_macro, best_fold_epoch, label_map)
             if val_f1_macro > best_overall_f1_macro:
                 best_overall_f1_macro = val_f1_macro
                 best_overall_state = {k: v.detach().cpu() for k, v in model.state_dict().items()}
@@ -567,7 +564,8 @@ def training(df=None, csv_path='/root/skinai/data/GroundTruth.csv', output_dir='
         num_workers=num_workers,
         pin_memory=pin_memory,
         persistent_workers=persistent_workers,
-        num_folds=num_folds
+        num_folds=num_folds,
+        image_root=image_root
     )
     if not fold_df.empty:
         print("Testing per fold:")
@@ -578,8 +576,8 @@ def training(df=None, csv_path='/root/skinai/data/GroundTruth.csv', output_dir='
      
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--csv-path', default='/root/skinai/data/GroundTruth.csv')
-    parser.add_argument('--output-dir', default='/root/skinai/data/qi')
+    parser.add_argument('--csv-path', default=None)
+    parser.add_argument('--output-dir', default=None)
     parser.add_argument('--mode', choices=['fs', 'wd', 'pf', 'bs'], default='fs')
     parser.add_argument('--epochs', type=int, default=10)
     parser.add_argument('--batch-size', type=int, default=256)
@@ -587,16 +585,22 @@ if __name__ == "__main__":
     parser.add_argument('--num-workers', type=int, default=None)
     parser.add_argument('--learning-rate', type=float, default=1e-5)
     parser.add_argument('--run-test-only', action='store_true', default=False)
+    parser.add_argument('--preprocess-config', default=None)
     parser.add_argument('--pin-memory', dest='pin_memory', action='store_true')
     parser.add_argument('--no-pin-memory', dest='pin_memory', action='store_false')
     parser.set_defaults(pin_memory=True)
     args = parser.parse_args()
 
-    csv_path = args.csv_path
-    output_dir = args.output_dir
+    paths = _resolve_paths(csv_path=args.csv_path, output_dir=args.output_dir)
+    csv_path = paths['csv_path']
+    output_dir = paths['output_dir']
+    img_dir = paths['img_dir']
+    mask_dir = paths['mask_dir']
+    base_dir = paths['base_dir']
     mode = args.mode
     start_time = time.time()
     run_test_only = args.run_test_only
+    preprocess_config_path = args.preprocess_config
     epochs = args.epochs
     batch_size = args.batch_size
     num_workers = args.num_workers
@@ -620,14 +624,14 @@ if __name__ == "__main__":
     pd.DataFrame([run_params]).to_csv(os.path.join(results_root, f'run_params_{mode}.csv'), index=False)
     if not os.path.exists(output_dir) or not os.listdir(output_dir):
         print("=== 步骤1：运行预处理生成质量特征 ===")
-        preprocessing(csv_path=csv_path, output_dir=output_dir)
+        preprocessing(csv_path=csv_path, output_dir=output_dir, img_dir=img_dir, mask_dir=mask_dir, base_dir=base_dir)
     else:
         print(f"✅ 预处理数据已存在：{len(os.listdir(output_dir))} 个文件")
     if run_test_only:
         print("\n=== 步骤2：开始测试流程（仅测试） ===")
-        run_testing_only(csv_path=csv_path, output_dir=output_dir, mode=mode, batch_size=batch_size, num_workers=num_workers, pin_memory=pin_memory)
+        run_testing_only(csv_path=csv_path, output_dir=output_dir, img_dir=img_dir, mode=mode, batch_size=batch_size, num_workers=num_workers, pin_memory=pin_memory, base_dir=base_dir, preprocess_config_path=preprocess_config_path)
     else:
         print("\n=== 步骤2：开始训练流程 ===")
-        training(csv_path=csv_path, output_dir=output_dir, mode=mode, epochs=epochs, batch_size=batch_size, num_folds=num_folds, num_workers=num_workers, pin_memory=pin_memory, learning_rate=learning_rate)
+        training(csv_path=csv_path, output_dir=output_dir, img_dir=img_dir, mode=mode, epochs=epochs, batch_size=batch_size, num_folds=num_folds, num_workers=num_workers, pin_memory=pin_memory, learning_rate=learning_rate, base_dir=base_dir, preprocess_config_path=preprocess_config_path)
     elapsed = time.time() - start_time
     print(f"\n=== 总耗时：{elapsed:.2f} 秒 ===")
